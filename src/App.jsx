@@ -1,0 +1,1588 @@
+// whatis | 數位材質庫
+// 技術棧：React + Google Apps Script + Google Sheets + Google Drive
+
+const GAS_URL = "https://script.google.com/macros/s/AKfycbwp3sq5XXWNRfREzMQ1K4zC12dTTqC7wro142iyyAxpYqpbxrKnTeD2NgRM1Jt3IxHx/exec";
+const ADMIN_PASSWORD = "82825494";
+
+// ─── 工具函式 ───────────────────────────────────────────────
+async function sheetGet(sheetName) {
+  const r = await fetch(`${GAS_URL}?sheet=${encodeURIComponent(sheetName)}`);
+  return r.json();
+}
+
+async function sheetPut(sheetName, values) {
+  const r = await fetch(GAS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ sheet: sheetName, values }),
+  });
+  return r.json();
+}
+
+async function uploadImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const base64 = e.target.result.split(",")[1];
+        const res = await fetch(GAS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({
+            action: "uploadImage",
+            base64,
+            fileName: `mat_${Date.now()}_${file.name}`,
+            mimeType: file.type,
+          }),
+        });
+        resolve(await res.json());
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function deleteImage(fileId) {
+  const r = await fetch(GAS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ action: "deleteImage", fileId }),
+  });
+  return r.json();
+}
+
+function rowsToTypes(rows) {
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter((r) => r[0]).map((r) => ({
+    code: r[0] || "",
+    name: r[1] || "",
+    active: r[2] === "TRUE",
+  }));
+}
+
+function typesToRows(types) {
+  const h = ["code", "name", "active"];
+  return [h, ...types.map((t) => [t.code, t.name, t.active ? "TRUE" : "FALSE"])];
+}
+
+function rowsToMembers(rows) {
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter((r) => r[0]).map((r) => ({
+    name: r[0] || "",
+    active: r[1] === "TRUE",
+  }));
+}
+
+function membersToRows(members) {
+  const h = ["name", "active"];
+  return [h, ...members.map((m) => [m.name, m.active ? "TRUE" : "FALSE"])];
+}
+
+function rowsToMaterials(rows) {
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter((r) => r[0]).map((r) => {
+    let image = null;
+    try {
+      const parsed = JSON.parse(r[8]);
+      image = parsed && parsed.fileId ? parsed : null;
+    } catch (e) {
+      image = null;
+    }
+    return {
+      id: r[0] || "",
+      typeCode: r[1] || "",
+      number: r[2] || "",
+      year: r[3] || "",
+      name: r[4] || "",
+      status: r[5] || "上架",
+      vendor: r[6] || "",
+      spec: r[7] || "",
+      image,
+      note: r[9] || "",
+      createdBy: r[10] || "",
+      updatedBy: r[11] || "",
+      updatedAt: r[12] || "",
+    };
+  });
+}
+
+function materialsToRows(materials) {
+  const h = ["id","typeCode","number","year","name","status","vendor","spec","image","note","createdBy","updatedBy","updatedAt"];
+  return [
+    h,
+    ...materials.map((m) => [
+      m.id,
+      m.typeCode,
+      m.number,
+      m.year,
+      m.name,
+      m.status,
+      m.vendor,
+      m.spec,
+      m.image ? JSON.stringify(m.image) : "",
+      m.note,
+      m.createdBy,
+      m.updatedBy,
+      m.updatedAt,
+    ]),
+  ];
+}
+
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function nextNumber(typeCode, materials) {
+  const existing = materials
+    .filter((m) => m.typeCode === typeCode)
+    .map((m) => {
+      const parts = m.number.split("-");
+      const n = parseInt(parts[parts.length - 1], 10);
+      return isNaN(n) ? 0 : n;
+    });
+  const max = existing.length ? Math.max(...existing) : 0;
+  return String(max + 1).padStart(3, "0");
+}
+
+function suggestCode(typeName) {
+  if (!typeName) return "";
+  const map = {
+    木: "WD", 皮: "WD-V", 實木: "WD-S", 科技: "TW", 玻璃: "GL",
+    磚: "TL", 磁磚: "TL", 石: "ST", 大理石: "ST-M", 布: "FB",
+    金屬: "MT", 鐵: "MT-I", 鋁: "MT-A", 塑: "PL", 油漆: "PT",
+  };
+  for (const [key, val] of Object.entries(map)) {
+    if (typeName.includes(key)) return val;
+  }
+  const initials = typeName
+    .split("")
+    .slice(0, 2)
+    .map((c) => c.charCodeAt(0).toString(16).toUpperCase().slice(0, 1))
+    .join("");
+  return initials || "XX";
+}
+
+// ─── 全域樣式 ────────────────────────────────────────────────
+const G = {
+  bg: "#ffffff",
+  surface: "#f5f5f5",
+  border: "#e0e0e0",
+  borderLight: "#eeeeee",
+  text: "#333333",
+  textSec: "#888888",
+  textMuted: "#bbbbbb",
+  accent: "#555555",
+  accentLight: "#eeeeee",
+  success: "#6aaa8a",
+  warning: "#c9a84c",
+  danger: "#c0675a",
+  info: "#6a96b0",
+  font: '"微軟正黑體","Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif',
+};
+
+const s = {
+  page: {
+    fontFamily: G.font,
+    background: G.bg,
+    color: G.text,
+    minHeight: "100vh",
+    fontSize: 14,
+  },
+  topbar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "0 32px",
+    height: 56,
+    borderBottom: `1px solid ${G.border}`,
+    background: G.bg,
+  },
+  logo: {
+    fontSize: 15,
+    fontWeight: 500,
+    letterSpacing: "0.04em",
+    color: G.text,
+  },
+  logoSub: {
+    fontSize: 12,
+    color: G.textMuted,
+    marginLeft: 8,
+    fontWeight: 400,
+  },
+  main: {
+    display: "flex",
+    height: "calc(100vh - 56px)",
+  },
+  sidebar: {
+    width: 200,
+    borderRight: `1px solid ${G.border}`,
+    padding: "20px 0",
+    flexShrink: 0,
+    overflowY: "auto",
+  },
+  sideSection: {
+    padding: "0 16px 8px",
+    fontSize: 11,
+    color: G.textMuted,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    marginTop: 16,
+  },
+  sideItem: (active) => ({
+    padding: "8px 20px",
+    cursor: "pointer",
+    fontSize: 13,
+    color: active ? G.text : G.textSec,
+    background: active ? G.accentLight : "transparent",
+    borderLeft: active ? `2px solid ${G.accent}` : "2px solid transparent",
+    transition: "all 0.15s ease",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  }),
+  content: {
+    flex: 1,
+    overflowY: "auto",
+    padding: "28px 36px",
+  },
+  card: {
+    background: G.bg,
+    border: `1px solid ${G.border}`,
+    borderRadius: 6,
+    padding: "20px 24px",
+  },
+  row: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  btnPrimary: {
+    background: G.text,
+    color: "#fff",
+    border: "none",
+    borderRadius: 4,
+    padding: "7px 16px",
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: "pointer",
+    fontFamily: G.font,
+    transition: "background 0.15s ease",
+  },
+  btnSecondary: {
+    background: "transparent",
+    color: G.text,
+    border: `1px solid ${G.border}`,
+    borderRadius: 4,
+    padding: "7px 16px",
+    fontSize: 13,
+    cursor: "pointer",
+    fontFamily: G.font,
+    transition: "background 0.15s ease",
+  },
+  btnDanger: {
+    background: "transparent",
+    color: G.danger,
+    border: `1px solid ${G.danger}`,
+    borderRadius: 4,
+    padding: "7px 16px",
+    fontSize: 13,
+    cursor: "pointer",
+    fontFamily: G.font,
+  },
+  input: {
+    border: `1px solid ${G.border}`,
+    borderRadius: 4,
+    padding: "7px 11px",
+    fontSize: 13,
+    color: G.text,
+    background: G.bg,
+    outline: "none",
+    fontFamily: G.font,
+    width: "100%",
+    boxSizing: "border-box",
+  },
+  label: {
+    fontSize: 12,
+    color: G.textSec,
+    marginBottom: 4,
+    display: "block",
+  },
+  tag: (color) => ({
+    display: "inline-block",
+    fontSize: 11,
+    padding: "2px 8px",
+    borderRadius: 3,
+    background: color === "green" ? "#edf6f0" : color === "red" ? "#fdf2f1" : G.accentLight,
+    color: color === "green" ? G.success : color === "red" ? G.danger : G.textSec,
+    fontWeight: 500,
+  }),
+  modal: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.25)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  modalBox: {
+    background: G.bg,
+    border: `1px solid ${G.border}`,
+    borderRadius: 6,
+    padding: "28px 32px",
+    width: 520,
+    maxWidth: "92vw",
+    maxHeight: "88vh",
+    overflowY: "auto",
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: 500,
+    marginBottom: 20,
+    color: G.text,
+  },
+  tableWrap: {
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: 13,
+  },
+  th: {
+    padding: "10px 12px",
+    textAlign: "left",
+    fontSize: 11,
+    color: G.textMuted,
+    borderBottom: `1px solid ${G.border}`,
+    fontWeight: 500,
+    letterSpacing: "0.04em",
+    whiteSpace: "nowrap",
+  },
+  td: {
+    padding: "10px 12px",
+    borderBottom: `1px solid ${G.borderLight}`,
+    color: G.text,
+    verticalAlign: "middle",
+  },
+};
+
+// ─── 圖片正方形元件 ──────────────────────────────────────────
+function SquareImage({ image, size = 48, onClick }) {
+  if (!image) {
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          background: G.surface,
+          border: `1px solid ${G.border}`,
+          borderRadius: 4,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 11, color: G.textMuted }}>無</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 4,
+        overflow: "hidden",
+        flexShrink: 0,
+        cursor: "pointer",
+        border: `1px solid ${G.border}`,
+      }}
+      title="點擊放大"
+    >
+      <img
+        src={image.thumbUrl || image.viewUrl}
+        alt=""
+        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+      />
+    </div>
+  );
+}
+
+// ─── 圖片燈箱 ────────────────────────────────────────────────
+function LightBox({ image, onClose }) {
+  if (!image) return null;
+  return (
+    <div style={s.modal} onClick={onClose}>
+      <div
+        style={{ maxWidth: "88vw", maxHeight: "88vh", position: "relative" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <img
+          src={image.viewUrl}
+          alt={image.fileName || ""}
+          style={{ maxWidth: "88vw", maxHeight: "80vh", borderRadius: 4, display: "block" }}
+        />
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+          <a
+            href={image.viewUrl}
+            download
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...s.btnSecondary, textDecoration: "none", display: "inline-block" }}
+          >
+            下載原圖
+          </a>
+          <button style={s.btnSecondary} onClick={onClose}>
+            關閉
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 主 App ──────────────────────────────────────────────────
+function App() {
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const [materials, setMaterials] = React.useState([]);
+  const [types, setTypes] = React.useState([]);
+  const [members, setMembers] = React.useState([]);
+
+  const [currentUser, setCurrentUser] = React.useState(null);
+  const [activeTab, setActiveTab] = React.useState("__all__");
+
+  // modal states
+  const [lightboxImage, setLightboxImage] = React.useState(null);
+  const [editMaterial, setEditMaterial] = React.useState(null); // null=closed, {}=new, {...}=edit
+  const [editType, setEditType] = React.useState(null);
+  const [showTypeManager, setShowTypeManager] = React.useState(false);
+  const [showMemberManager, setShowMemberManager] = React.useState(false);
+  const [adminModal, setAdminModal] = React.useState(null); // {action, data}
+  const [adminPw, setAdminPw] = React.useState("");
+  const [adminError, setAdminError] = React.useState("");
+
+  // filter / search
+  const [searchText, setSearchText] = React.useState("");
+  const [filterStatus, setFilterStatus] = React.useState("all");
+
+  // export selection
+  const [exportMode, setExportMode] = React.useState(false);
+  const [exportSelected, setExportSelected] = React.useState([]);
+
+  // image uploading state
+  const [uploadingImage, setUploadingImage] = React.useState(false);
+
+  const latestState = React.useRef({ materials, types, members });
+  React.useEffect(() => {
+    latestState.current = { materials, types, members };
+  }, [materials, types, members]);
+
+  // ── 初始載入 ─────────────────────────────────────────────
+  React.useEffect(() => {
+    loadAll();
+  }, []);
+
+  async function loadAll() {
+    setLoading(true);
+    setError("");
+    try {
+      const [matRows, typeRows, memberRows] = await Promise.all([
+        sheetGet("Materials"),
+        sheetGet("Types"),
+        sheetGet("Members"),
+      ]);
+      setMaterials(rowsToMaterials(matRows));
+      setTypes(rowsToTypes(typeRows));
+      setMembers(rowsToMembers(memberRows));
+    } catch (e) {
+      setError("載入失敗，請確認網路與 GAS 部署設定");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── 儲存 ─────────────────────────────────────────────────
+  async function saveAll(newMaterials, newTypes, newMembers) {
+    setSaving(true);
+    try {
+      const saves = [];
+      if (newMaterials !== undefined)
+        saves.push(sheetPut("Materials", materialsToRows(newMaterials)));
+      if (newTypes !== undefined)
+        saves.push(sheetPut("Types", typesToRows(newTypes)));
+      if (newMembers !== undefined)
+        saves.push(sheetPut("Members", membersToRows(newMembers)));
+      await Promise.all(saves);
+    } catch (e) {
+      setError("儲存失敗：" + e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── 篩選邏輯 ─────────────────────────────────────────────
+  const filteredMaterials = React.useMemo(() => {
+    let list = materials;
+    if (activeTab !== "__all__") list = list.filter((m) => m.typeCode === activeTab);
+    if (filterStatus !== "all") list = list.filter((m) => m.status === filterStatus);
+    if (searchText.trim()) {
+      const q = searchText.trim().toLowerCase();
+      list = list.filter(
+        (m) =>
+          m.name.toLowerCase().includes(q) ||
+          m.number.toLowerCase().includes(q) ||
+          m.vendor.toLowerCase().includes(q) ||
+          m.note.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [materials, activeTab, filterStatus, searchText]);
+
+  // ── 類型管理 ─────────────────────────────────────────────
+  function openNewType() {
+    setEditType({ code: "", name: "", active: true, isNew: true });
+  }
+
+  function saveType(t) {
+    const { materials: curMats, types: curTypes } = latestState.current;
+    // 衝突偵測：code 重複
+    const conflict = curTypes.find(
+      (x) => x.code === t.code && (!t._origCode || x.code !== t._origCode)
+    );
+    if (conflict && t.isNew) {
+      return alert(`代號「${t.code}」已存在，請更換`);
+    }
+    let newTypes;
+    if (t.isNew) {
+      newTypes = [...curTypes, { code: t.code, name: t.name, active: t.active }];
+    } else {
+      newTypes = curTypes.map((x) =>
+        x.code === t._origCode ? { code: t.code, name: t.name, active: t.active } : x
+      );
+      // 同步更新材料的 typeCode
+      if (t._origCode !== t.code) {
+        const newMats = curMats.map((m) =>
+          m.typeCode === t._origCode ? { ...m, typeCode: t.code } : m
+        );
+        setMaterials(newMats);
+        saveAll(newMats, newTypes, undefined);
+        setTypes(newTypes);
+        setEditType(null);
+        return;
+      }
+    }
+    setTypes(newTypes);
+    saveAll(undefined, newTypes, undefined);
+    setEditType(null);
+  }
+
+  function deleteType(code) {
+    const { materials: curMats, types: curTypes } = latestState.current;
+    const inUse = curMats.some((m) => m.typeCode === code);
+    if (inUse) return alert("此類型有材料使用中，無法刪除，請先將材料移至其他類型");
+    const newTypes = curTypes.filter((t) => t.code !== code);
+    setTypes(newTypes);
+    saveAll(undefined, newTypes, undefined);
+  }
+
+  // ── 成員管理 ─────────────────────────────────────────────
+  function addMember(name) {
+    const { members: curMembers } = latestState.current;
+    if (curMembers.find((m) => m.name === name)) return alert("此成員已存在");
+    const newMembers = [...curMembers, { name, active: true }];
+    setMembers(newMembers);
+    saveAll(undefined, undefined, newMembers);
+  }
+
+  function deactivateMember(name) {
+    const { members: curMembers } = latestState.current;
+    const newMembers = curMembers.map((m) =>
+      m.name === name ? { ...m, active: false } : m
+    );
+    setMembers(newMembers);
+    if (currentUser === name) setCurrentUser(null);
+    saveAll(undefined, undefined, newMembers);
+  }
+
+  // ── 材料 CRUD ────────────────────────────────────────────
+  function openNewMaterial() {
+    const tc = activeTab === "__all__" ? (types[0] ? types[0].code : "") : activeTab;
+    const num = nextNumber(tc, materials);
+    const typeObj = types.find((t) => t.code === tc);
+    setEditMaterial({
+      isNew: true,
+      id: genId(),
+      typeCode: tc,
+      number: tc ? `${tc}-${num}` : "",
+      year: new Date().getFullYear().toString(),
+      name: "",
+      status: "上架",
+      vendor: "",
+      spec: "",
+      image: null,
+      note: "",
+      createdBy: currentUser || "",
+      updatedBy: currentUser || "",
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  function openEditMaterial(m) {
+    setEditMaterial({ ...m, isNew: false, _origNumber: m.number });
+  }
+
+  async function saveMaterial(m) {
+    const { materials: curMats } = latestState.current;
+    // 衝突偵測：相同類型下 number 重複
+    const conflict = curMats.find(
+      (x) =>
+        x.typeCode === m.typeCode &&
+        x.number === m.number &&
+        x.id !== m.id
+    );
+
+    const now = new Date().toISOString();
+    const updated = {
+      ...m,
+      updatedBy: currentUser || m.updatedBy,
+      updatedAt: now,
+    };
+    delete updated.isNew;
+    delete updated._origNumber;
+    delete updated._conflict;
+
+    let newMats;
+    if (m.isNew) {
+      updated.createdBy = currentUser || "";
+      newMats = [...curMats, updated];
+    } else {
+      newMats = curMats.map((x) => (x.id === m.id ? updated : x));
+    }
+
+    setMaterials(newMats);
+    await saveAll(newMats, undefined, undefined);
+    setEditMaterial(null);
+
+    if (conflict) {
+      alert(`注意：編號「${m.number}」在此類型中已存在衝突，請至列表排查`);
+    }
+  }
+
+  function deleteMaterial(id) {
+    const { materials: curMats } = latestState.current;
+    const newMats = curMats.filter((m) => m.id !== id);
+    setMaterials(newMats);
+    saveAll(newMats, undefined, undefined);
+  }
+
+  // ── 衝突偵測（編號） ──────────────────────────────────────
+  function getNumberConflicts(mats) {
+    const counts = {};
+    mats.forEach((m) => {
+      const key = `${m.typeCode}::${m.number}`;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const conflictKeys = new Set(
+      Object.entries(counts)
+        .filter(([, v]) => v > 1)
+        .map(([k]) => k)
+    );
+    return conflictKeys;
+  }
+
+  const conflictKeys = React.useMemo(
+    () => getNumberConflicts(materials),
+    [materials]
+  );
+
+  // ── PDF 匯出 ──────────────────────────────────────────────
+  function exportPDF() {
+    const selected = materials.filter((m) => exportSelected.includes(m.id));
+    if (!selected.length) return alert("請先勾選材料");
+
+    const win = window.open("", "_blank");
+    const typeMap = {};
+    types.forEach((t) => (typeMap[t.code] = t.name));
+
+    const rows = selected
+      .map(
+        (m) => `
+      <tr>
+        <td style="width:60px;padding:8px;">
+          ${
+            m.image
+              ? `<img src="${m.image.thumbUrl || m.image.viewUrl}" style="width:52px;height:52px;object-fit:cover;border-radius:3px;" />`
+              : '<div style="width:52px;height:52px;background:#f5f5f5;border-radius:3px;"></div>'
+          }
+        </td>
+        <td style="padding:8px 12px;font-size:12px;color:#555;">${m.number}</td>
+        <td style="padding:8px 12px;font-size:13px;font-weight:500;">${m.name}</td>
+        <td style="padding:8px 12px;font-size:12px;color:#555;">${typeMap[m.typeCode] || m.typeCode}</td>
+        <td style="padding:8px 12px;font-size:12px;color:#555;">${m.vendor}</td>
+        <td style="padding:8px 12px;font-size:12px;color:#555;">${m.spec}</td>
+        <td style="padding:8px 12px;font-size:12px;color:#555;">${m.year}</td>
+        <td style="padding:8px 12px;font-size:12px;">
+          <span style="padding:2px 8px;border-radius:3px;background:${m.status === "上架" ? "#edf6f0" : "#f5f5f5"};color:${m.status === "上架" ? "#6aaa8a" : "#aaa"};">${m.status}</span>
+        </td>
+        <td style="padding:8px 12px;font-size:12px;color:#888;">${m.note}</td>
+      </tr>`
+      )
+      .join("");
+
+    win.document.write(`<!DOCTYPE html><html><head>
+      <meta charset="utf-8">
+      <title>whatis | 材料表</title>
+      <style>
+        body { font-family: "微軟正黑體","PingFang TC",sans-serif; margin: 40px; color: #333; }
+        h2 { font-size: 18px; font-weight: 500; margin-bottom: 4px; }
+        p { font-size: 12px; color: #888; margin: 0 0 24px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { font-size: 11px; color: #aaa; text-align: left; padding: 8px 12px; border-bottom: 1px solid #e0e0e0; letter-spacing: 0.04em; }
+        tr { border-bottom: 1px solid #f0f0f0; }
+        @media print { body { margin: 20px; } }
+      </style>
+    </head><body>
+      <h2>whatis | 材料表</h2>
+      <p>匯出日期：${new Date().toLocaleDateString("zh-TW")} &nbsp;·&nbsp; 共 ${selected.length} 筆</p>
+      <table>
+        <thead><tr>
+          <th>圖片</th><th>編號</th><th>名稱</th><th>類型</th>
+          <th>廠商</th><th>規格</th><th>年份</th><th>狀態</th><th>備註</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <script>window.onload = function(){ window.print(); }<\/script>
+    </body></html>`);
+    win.document.close();
+  }
+
+  // ── 登入畫面 ─────────────────────────────────────────────
+  if (!currentUser) {
+    return (
+      <div style={{ ...s.page, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <div style={{ ...s.card, width: 340, textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 4 }}>whatis</div>
+          <div style={{ fontSize: 12, color: G.textMuted, marginBottom: 28 }}>數位材質庫</div>
+          <div style={{ textAlign: "left", marginBottom: 8 }}>
+            <span style={s.label}>請選擇使用者</span>
+          </div>
+          {loading ? (
+            <div style={{ color: G.textMuted, fontSize: 13 }}>載入中…</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {members.filter((m) => m.active).map((m) => (
+                <button
+                  key={m.name}
+                  style={{ ...s.btnSecondary, textAlign: "center" }}
+                  onClick={() => setCurrentUser(m.name)}
+                >
+                  {m.name}
+                </button>
+              ))}
+              {members.filter((m) => m.active).length === 0 && (
+                <div style={{ fontSize: 13, color: G.textMuted }}>尚無成員，請聯繫管理員</div>
+              )}
+            </div>
+          )}
+          {error && <div style={{ marginTop: 12, fontSize: 12, color: G.danger }}>{error}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  // ── 主介面 ───────────────────────────────────────────────
+  const activeTypes = types.filter((t) => t.active);
+
+  return (
+    <div style={s.page}>
+      {/* 頂欄 */}
+      <div style={s.topbar}>
+        <div style={s.row}>
+          <span style={s.logo}>whatis</span>
+          <span style={s.logoSub}>數位材質庫</span>
+        </div>
+        <div style={{ ...s.row, gap: 12 }}>
+          {saving && <span style={{ fontSize: 12, color: G.textMuted }}>儲存中…</span>}
+          {exportMode ? (
+            <>
+              <span style={{ fontSize: 12, color: G.textSec }}>
+                已選 {exportSelected.length} 筆
+              </span>
+              <button style={s.btnPrimary} onClick={exportPDF}>
+                匯出 PDF
+              </button>
+              <button
+                style={s.btnSecondary}
+                onClick={() => { setExportMode(false); setExportSelected([]); }}
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <>
+              <button style={s.btnSecondary} onClick={() => setExportMode(true)}>
+                匯出材料表
+              </button>
+              <button style={s.btnSecondary} onClick={() => setShowTypeManager(true)}>
+                類型管理
+              </button>
+              <button
+                style={s.btnSecondary}
+                onClick={() => setShowMemberManager(true)}
+              >
+                成員管理
+              </button>
+            </>
+          )}
+          <div
+            style={{
+              fontSize: 13,
+              color: G.textSec,
+              cursor: "pointer",
+              padding: "4px 8px",
+              borderRadius: 4,
+              border: `1px solid ${G.border}`,
+            }}
+            onClick={() => setCurrentUser(null)}
+            title="切換使用者"
+          >
+            {currentUser}
+          </div>
+        </div>
+      </div>
+
+      {/* 主體 */}
+      <div style={s.main}>
+        {/* 側欄 */}
+        <div style={s.sidebar}>
+          <div style={s.sideSection}>類型</div>
+          <div
+            style={s.sideItem(activeTab === "__all__")}
+            onClick={() => setActiveTab("__all__")}
+          >
+            全部材料
+          </div>
+          {activeTypes.map((t) => (
+            <div
+              key={t.code}
+              style={s.sideItem(activeTab === t.code)}
+              onClick={() => setActiveTab(t.code)}
+              title={`${t.code} · ${t.name}`}
+            >
+              {t.name}
+              <span style={{ fontSize: 11, color: G.textMuted, marginLeft: 4 }}>
+                ({materials.filter((m) => m.typeCode === t.code).length})
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* 內容 */}
+        <div style={s.content}>
+          {error && (
+            <div
+              style={{
+                background: "#fdf2f1",
+                border: `1px solid ${G.danger}`,
+                borderRadius: 4,
+                padding: "8px 14px",
+                fontSize: 13,
+                color: G.danger,
+                marginBottom: 16,
+              }}
+            >
+              {error}
+            </div>
+          )}
+
+          {/* 工具列 */}
+          <div style={{ ...s.row, justifyContent: "space-between", marginBottom: 20 }}>
+            <div style={{ ...s.row, gap: 8 }}>
+              <input
+                style={{ ...s.input, width: 200 }}
+                placeholder="搜尋名稱、編號、廠商…"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+              />
+              <select
+                style={{ ...s.input, width: 100 }}
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+              >
+                <option value="all">全部狀態</option>
+                <option value="上架">上架</option>
+                <option value="下架">下架</option>
+              </select>
+            </div>
+            <div style={s.row}>
+              <span style={{ fontSize: 12, color: G.textMuted, marginRight: 8 }}>
+                {filteredMaterials.length} 筆
+              </span>
+              <button style={s.btnPrimary} onClick={openNewMaterial}>
+                + 新增材料
+              </button>
+            </div>
+          </div>
+
+          {/* 衝突警告 */}
+          {conflictKeys.size > 0 && (
+            <div
+              style={{
+                background: "#fffbf0",
+                border: `1px solid ${G.warning}`,
+                borderRadius: 4,
+                padding: "8px 14px",
+                fontSize: 12,
+                color: G.warning,
+                marginBottom: 16,
+              }}
+            >
+              ⚠️ 偵測到 {conflictKeys.size} 個編號衝突，衝突列已以橘色標示，請排查修正
+            </div>
+          )}
+
+          {/* 材料表格 */}
+          {loading ? (
+            <div style={{ padding: 40, textAlign: "center", color: G.textMuted, fontSize: 13 }}>
+              載入中…
+            </div>
+          ) : (
+            <div style={{ ...s.card, padding: 0, overflow: "hidden" }}>
+              <table style={s.tableWrap}>
+                <thead>
+                  <tr>
+                    {exportMode && <th style={s.th}></th>}
+                    <th style={s.th}>圖片</th>
+                    <th style={s.th}>編號</th>
+                    <th style={s.th}>名稱</th>
+                    <th style={s.th}>類型</th>
+                    <th style={s.th}>年份</th>
+                    <th style={s.th}>廠商</th>
+                    <th style={s.th}>規格</th>
+                    <th style={s.th}>狀態</th>
+                    <th style={s.th}>備註</th>
+                    <th style={s.th}>操作者</th>
+                    <th style={s.th}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredMaterials.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={exportMode ? 12 : 11}
+                        style={{ ...s.td, textAlign: "center", color: G.textMuted, padding: 32 }}
+                      >
+                        尚無材料
+                      </td>
+                    </tr>
+                  )}
+                  {filteredMaterials.map((m) => {
+                    const isConflict = conflictKeys.has(`${m.typeCode}::${m.number}`);
+                    const typeObj = types.find((t) => t.code === m.typeCode);
+                    return (
+                      <tr
+                        key={m.id}
+                        style={{
+                          background: isConflict ? "#fffbf0" : undefined,
+                          borderLeft: isConflict ? `3px solid ${G.warning}` : undefined,
+                        }}
+                      >
+                        {exportMode && (
+                          <td style={{ ...s.td, width: 36 }}>
+                            <input
+                              type="checkbox"
+                              checked={exportSelected.includes(m.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setExportSelected((p) => [...p, m.id]);
+                                } else {
+                                  setExportSelected((p) => p.filter((x) => x !== m.id));
+                                }
+                              }}
+                            />
+                          </td>
+                        )}
+                        <td style={s.td}>
+                          <SquareImage
+                            image={m.image}
+                            size={44}
+                            onClick={() => m.image && setLightboxImage(m.image)}
+                          />
+                        </td>
+                        <td style={{ ...s.td, fontFamily: "monospace", fontSize: 12, color: isConflict ? G.warning : G.textSec }}>
+                          {m.number}
+                          {isConflict && " ⚠️"}
+                        </td>
+                        <td style={{ ...s.td, fontWeight: 500 }}>{m.name}</td>
+                        <td style={{ ...s.td, fontSize: 12, color: G.textSec }}>
+                          {typeObj ? typeObj.name : m.typeCode}
+                        </td>
+                        <td style={{ ...s.td, fontSize: 12, color: G.textSec }}>{m.year}</td>
+                        <td style={{ ...s.td, fontSize: 12 }}>{m.vendor}</td>
+                        <td style={{ ...s.td, fontSize: 12, color: G.textSec }}>{m.spec}</td>
+                        <td style={s.td}>
+                          <span style={s.tag(m.status === "上架" ? "green" : "gray")}>
+                            {m.status}
+                          </span>
+                        </td>
+                        <td style={{ ...s.td, fontSize: 12, color: G.textSec, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {m.note}
+                        </td>
+                        <td style={{ ...s.td, fontSize: 11, color: G.textMuted }}>
+                          {m.updatedBy || m.createdBy}
+                        </td>
+                        <td style={s.td}>
+                          <div style={s.row}>
+                            <button
+                              style={{ ...s.btnSecondary, padding: "4px 10px", fontSize: 12 }}
+                              onClick={() => openEditMaterial(m)}
+                            >
+                              編輯
+                            </button>
+                            <button
+                              style={{ ...s.btnDanger, padding: "4px 10px", fontSize: 12 }}
+                              onClick={() => {
+                                if (window.confirm(`確認刪除「${m.name}」？`)) {
+                                  deleteMaterial(m.id);
+                                }
+                              }}
+                            >
+                              刪除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 材料編輯 Modal ── */}
+      {editMaterial && (
+        <MaterialModal
+          material={editMaterial}
+          types={types.filter((t) => t.active)}
+          materials={materials}
+          onSave={saveMaterial}
+          onClose={() => setEditMaterial(null)}
+          uploadingImage={uploadingImage}
+          setUploadingImage={setUploadingImage}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* ── 類型管理 Modal ── */}
+      {showTypeManager && (
+        <div style={s.modal} onClick={() => setShowTypeManager(false)}>
+          <div style={s.modalBox} onClick={(e) => e.stopPropagation()}>
+            <div style={{ ...s.row, justifyContent: "space-between", marginBottom: 16 }}>
+              <span style={s.modalTitle}>類型管理</span>
+              <button style={s.btnPrimary} onClick={openNewType}>
+                + 新增類型
+              </button>
+            </div>
+            <table style={s.tableWrap}>
+              <thead>
+                <tr>
+                  <th style={s.th}>代號</th>
+                  <th style={s.th}>名稱</th>
+                  <th style={s.th}>狀態</th>
+                  <th style={s.th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {types.map((t) => (
+                  <tr key={t.code}>
+                    <td style={{ ...s.td, fontFamily: "monospace", fontSize: 12 }}>{t.code}</td>
+                    <td style={s.td}>{t.name}</td>
+                    <td style={s.td}>
+                      <span style={s.tag(t.active ? "green" : "gray")}>
+                        {t.active ? "啟用" : "停用"}
+                      </span>
+                    </td>
+                    <td style={s.td}>
+                      <div style={s.row}>
+                        <button
+                          style={{ ...s.btnSecondary, padding: "4px 10px", fontSize: 12 }}
+                          onClick={() => setEditType({ ...t, _origCode: t.code, isNew: false })}
+                        >
+                          編輯
+                        </button>
+                        <button
+                          style={{ ...s.btnDanger, padding: "4px 10px", fontSize: 12 }}
+                          onClick={() => deleteType(t.code)}
+                        >
+                          刪除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ marginTop: 20, textAlign: "right" }}>
+              <button style={s.btnSecondary} onClick={() => setShowTypeManager(false)}>
+                關閉
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 類型編輯 Modal ── */}
+      {editType && (
+        <TypeModal
+          type={editType}
+          onSave={saveType}
+          onClose={() => setEditType(null)}
+        />
+      )}
+
+      {/* ── 成員管理 Modal ── */}
+      {showMemberManager && (
+        <MemberModal
+          members={members}
+          currentUser={currentUser}
+          onAdd={addMember}
+          onDeactivate={(name) => {
+            setAdminModal({ action: "deactivate", data: name });
+          }}
+          onClose={() => setShowMemberManager(false)}
+        />
+      )}
+
+      {/* ── 管理員驗證 Modal ── */}
+      {adminModal && (
+        <div style={s.modal}>
+          <div style={{ ...s.modalBox, width: 340 }}>
+            <div style={s.modalTitle}>管理員驗證</div>
+            <label style={s.label}>請輸入管理員密碼</label>
+            <input
+              type="password"
+              style={s.input}
+              value={adminPw}
+              onChange={(e) => { setAdminPw(e.target.value); setAdminError(""); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (adminPw === ADMIN_PASSWORD) {
+                    if (adminModal.action === "deactivate") {
+                      deactivateMember(adminModal.data);
+                    }
+                    setAdminModal(null);
+                    setAdminPw("");
+                  } else {
+                    setAdminError("密碼錯誤");
+                  }
+                }
+              }}
+              autoFocus
+            />
+            {adminError && <div style={{ fontSize: 12, color: G.danger, marginTop: 6 }}>{adminError}</div>}
+            <div style={{ ...s.row, justifyContent: "flex-end", marginTop: 16, gap: 8 }}>
+              <button
+                style={s.btnSecondary}
+                onClick={() => { setAdminModal(null); setAdminPw(""); setAdminError(""); }}
+              >
+                取消
+              </button>
+              <button
+                style={s.btnPrimary}
+                onClick={() => {
+                  if (adminPw === ADMIN_PASSWORD) {
+                    if (adminModal.action === "deactivate") {
+                      deactivateMember(adminModal.data);
+                    }
+                    setAdminModal(null);
+                    setAdminPw("");
+                  } else {
+                    setAdminError("密碼錯誤");
+                  }
+                }}
+              >
+                確認
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 燈箱 ── */}
+      <LightBox image={lightboxImage} onClose={() => setLightboxImage(null)} />
+    </div>
+  );
+}
+
+// ─── 材料編輯 Modal 元件 ─────────────────────────────────────
+function MaterialModal({ material, types, materials, onSave, onClose, uploadingImage, setUploadingImage, currentUser }) {
+  const [form, setForm] = React.useState({ ...material });
+  const [imagePreview, setImagePreview] = React.useState(material.image || null);
+
+  function set(key, val) {
+    setForm((p) => {
+      const next = { ...p, [key]: val };
+      // 當類型改變時，自動更新建議編號
+      if (key === "typeCode") {
+        const num = nextNumber(val, materials.filter((m) => m.id !== material.id));
+        next.number = val ? `${val}-${num}` : "";
+      }
+      return next;
+    });
+  }
+
+  async function handleImageUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) return alert("圖片請勿超過 10MB");
+    setUploadingImage(true);
+    try {
+      const result = await uploadImage(file);
+      if (result.success) {
+        setForm((p) => ({ ...p, image: result }));
+        setImagePreview(result);
+      } else {
+        alert("上傳失敗：" + (result.error || "未知錯誤"));
+      }
+    } catch (e) {
+      alert("上傳失敗：" + e.message);
+    } finally {
+      setUploadingImage(false);
+    }
+  }
+
+  async function handleRemoveImage() {
+    if (!form.image) return;
+    if (!window.confirm("確認刪除圖片？")) return;
+    try {
+      await deleteImage(form.image.fileId);
+    } catch (e) {}
+    setForm((p) => ({ ...p, image: null }));
+    setImagePreview(null);
+  }
+
+  const isDuplicate = materials.some(
+    (m) => m.typeCode === form.typeCode && m.number === form.number && m.id !== form.id
+  );
+
+  return (
+    <div style={s.modal} onClick={onClose}>
+      <div style={s.modalBox} onClick={(e) => e.stopPropagation()}>
+        <div style={s.modalTitle}>{material.isNew ? "新增材料" : "編輯材料"}</div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px 20px" }}>
+          {/* 類型 */}
+          <div>
+            <label style={s.label}>類型 *</label>
+            <select style={s.input} value={form.typeCode} onChange={(e) => set("typeCode", e.target.value)}>
+              <option value="">請選擇</option>
+              {types.map((t) => (
+                <option key={t.code} value={t.code}>
+                  {t.name}（{t.code}）
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 編號 */}
+          <div>
+            <label style={s.label}>
+              編號 *{" "}
+              {isDuplicate && (
+                <span style={{ color: G.warning, fontSize: 11 }}>⚠️ 此編號已存在</span>
+              )}
+            </label>
+            <input
+              style={{
+                ...s.input,
+                borderColor: isDuplicate ? G.warning : undefined,
+              }}
+              value={form.number}
+              onChange={(e) => set("number", e.target.value)}
+              placeholder="例如 WD-V-001"
+            />
+          </div>
+
+          {/* 名稱 */}
+          <div style={{ gridColumn: "span 2" }}>
+            <label style={s.label}>材質名稱 *</label>
+            <input style={s.input} value={form.name} onChange={(e) => set("name", e.target.value)} />
+          </div>
+
+          {/* 年份 */}
+          <div>
+            <label style={s.label}>使用年份</label>
+            <input style={s.input} value={form.year} onChange={(e) => set("year", e.target.value)} placeholder="2024" />
+          </div>
+
+          {/* 狀態 */}
+          <div>
+            <label style={s.label}>狀態</label>
+            <select style={s.input} value={form.status} onChange={(e) => set("status", e.target.value)}>
+              <option value="上架">上架</option>
+              <option value="下架">下架</option>
+            </select>
+          </div>
+
+          {/* 廠商 */}
+          <div>
+            <label style={s.label}>廠商</label>
+            <input style={s.input} value={form.vendor} onChange={(e) => set("vendor", e.target.value)} />
+          </div>
+
+          {/* 規格 */}
+          <div>
+            <label style={s.label}>規格尺寸</label>
+            <input style={s.input} value={form.spec} onChange={(e) => set("spec", e.target.value)} placeholder="例如 1220×2440mm" />
+          </div>
+
+          {/* 備註 */}
+          <div style={{ gridColumn: "span 2" }}>
+            <label style={s.label}>備註</label>
+            <textarea
+              style={{ ...s.input, height: 64, resize: "vertical" }}
+              value={form.note}
+              onChange={(e) => set("note", e.target.value)}
+            />
+          </div>
+
+          {/* 圖片上傳 */}
+          <div style={{ gridColumn: "span 2" }}>
+            <label style={s.label}>材料圖片</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {imagePreview ? (
+                <>
+                  <div
+                    style={{
+                      width: 72,
+                      height: 72,
+                      borderRadius: 4,
+                      overflow: "hidden",
+                      border: `1px solid ${G.border}`,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <img
+                      src={imagePreview.thumbUrl || imagePreview.viewUrl}
+                      alt=""
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 12, color: G.textSec }}>
+                      {imagePreview.fileName || "已上傳"}
+                    </span>
+                    <button
+                      style={{ ...s.btnDanger, padding: "4px 10px", fontSize: 12 }}
+                      onClick={handleRemoveImage}
+                    >
+                      移除圖片
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <label
+                  style={{
+                    ...s.btnSecondary,
+                    cursor: "pointer",
+                    display: "inline-block",
+                    opacity: uploadingImage ? 0.5 : 1,
+                  }}
+                >
+                  {uploadingImage ? "上傳中…" : "選擇圖片"}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={handleImageUpload}
+                    disabled={uploadingImage}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...s.row, justifyContent: "flex-end", marginTop: 24, gap: 8 }}>
+          <button style={s.btnSecondary} onClick={onClose}>
+            取消
+          </button>
+          <button
+            style={s.btnPrimary}
+            onClick={() => {
+              if (!form.typeCode) return alert("請選擇類型");
+              if (!form.number) return alert("請填寫編號");
+              if (!form.name) return alert("請填寫材質名稱");
+              onSave(form);
+            }}
+          >
+            {material.isNew ? "新增" : "儲存"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 類型編輯 Modal ──────────────────────────────────────────
+function TypeModal({ type, onSave, onClose }) {
+  const [form, setForm] = React.useState({ ...type });
+  const suggested = suggestCode(form.name);
+
+  return (
+    <div style={s.modal} onClick={onClose}>
+      <div style={{ ...s.modalBox, width: 380 }} onClick={(e) => e.stopPropagation()}>
+        <div style={s.modalTitle}>{type.isNew ? "新增類型" : "編輯類型"}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label style={s.label}>類型名稱 *</label>
+            <input
+              style={s.input}
+              value={form.name}
+              onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+              placeholder="例如：實木皮"
+            />
+          </div>
+          <div>
+            <label style={s.label}>
+              代號 *{" "}
+              {suggested && form.name && !form.code && (
+                <span
+                  style={{ color: G.info, fontSize: 11, cursor: "pointer" }}
+                  onClick={() => setForm((p) => ({ ...p, code: suggested }))}
+                >
+                  建議使用「{suggested}」
+                </span>
+              )}
+            </label>
+            <input
+              style={s.input}
+              value={form.code}
+              onChange={(e) => setForm((p) => ({ ...p, code: e.target.value.toUpperCase() }))}
+              placeholder="例如：WD-V"
+            />
+            <div style={{ fontSize: 11, color: G.textMuted, marginTop: 4 }}>
+              材料編號將自動以此代號為前綴，例如：{form.code || "XX"}-001
+            </div>
+          </div>
+          <div>
+            <label style={s.label}>狀態</label>
+            <select
+              style={s.input}
+              value={form.active ? "active" : "inactive"}
+              onChange={(e) => setForm((p) => ({ ...p, active: e.target.value === "active" }))}
+            >
+              <option value="active">啟用</option>
+              <option value="inactive">停用</option>
+            </select>
+          </div>
+        </div>
+        <div style={{ ...s.row, justifyContent: "flex-end", marginTop: 20, gap: 8 }}>
+          <button style={s.btnSecondary} onClick={onClose}>
+            取消
+          </button>
+          <button
+            style={s.btnPrimary}
+            onClick={() => {
+              if (!form.name) return alert("請填寫類型名稱");
+              if (!form.code) return alert("請填寫代號");
+              onSave(form);
+            }}
+          >
+            {type.isNew ? "新增" : "儲存"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 成員管理 Modal ──────────────────────────────────────────
+function MemberModal({ members, currentUser, onAdd, onDeactivate, onClose }) {
+  const [newName, setNewName] = React.useState("");
+  return (
+    <div style={s.modal} onClick={onClose}>
+      <div style={s.modalBox} onClick={(e) => e.stopPropagation()}>
+        <div style={s.modalTitle}>成員管理</div>
+        <table style={s.tableWrap}>
+          <thead>
+            <tr>
+              <th style={s.th}>姓名</th>
+              <th style={s.th}>狀態</th>
+              <th style={s.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m) => (
+              <tr key={m.name}>
+                <td style={s.td}>
+                  {m.name}
+                  {m.name === currentUser && (
+                    <span style={{ ...s.tag("gray"), marginLeft: 6 }}>目前使用者</span>
+                  )}
+                </td>
+                <td style={s.td}>
+                  <span style={s.tag(m.active ? "green" : "gray")}>
+                    {m.active ? "啟用" : "停用"}
+                  </span>
+                </td>
+                <td style={s.td}>
+                  {m.active && (
+                    <button
+                      style={{ ...s.btnDanger, padding: "4px 10px", fontSize: 12 }}
+                      onClick={() => onDeactivate(m.name)}
+                    >
+                      停用（需管理員）
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${G.borderLight}` }}>
+          <label style={s.label}>新增成員</label>
+          <div style={{ ...s.row, gap: 8 }}>
+            <input
+              style={{ ...s.input, flex: 1 }}
+              placeholder="輸入姓名"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newName.trim()) {
+                  onAdd(newName.trim());
+                  setNewName("");
+                }
+              }}
+            />
+            <button
+              style={s.btnPrimary}
+              onClick={() => {
+                if (newName.trim()) {
+                  onAdd(newName.trim());
+                  setNewName("");
+                }
+              }}
+            >
+              新增
+            </button>
+          </div>
+        </div>
+        <div style={{ textAlign: "right", marginTop: 16 }}>
+          <button style={s.btnSecondary} onClick={onClose}>
+            關閉
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
