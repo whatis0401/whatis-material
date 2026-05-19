@@ -1584,5 +1584,3 @@ function MemberModal({ members, currentUser, onAdd, onDeactivate, onClose }) {
     </div>
   );
 }
-
-export default App;
