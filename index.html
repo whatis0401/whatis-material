@@ -11,10 +11,12 @@
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel" src="./src/App.jsx" data-type="module"></script>
+  <script type="text/babel" src="./src/App.jsx"></script>
   <script type="text/babel">
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(App));
+    window.addEventListener('load', function() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(React.createElement(App));
+    });
   </script>
 </body>
 </html>
