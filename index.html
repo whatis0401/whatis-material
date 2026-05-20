@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>* { margin: 0; padding: 0; box-sizing: border-box; } body { background: #ffffff; }</style>
 </head>
 <body>
@@ -898,22 +899,52 @@ function App() {
     win.document.close();
   }
 
-  // ── 圖片批次下載 ──────────────────────────────────────────
-  function downloadImages() {
+  // ── 圖片批次下載（ZIP） ───────────────────────────────────
+  async function downloadImages() {
     const selected = materials.filter((m) => exportSelected.includes(m.id) && m.image);
     if (!selected.length) return alert("所選材料中沒有圖片");
-    // 逐一開啟 Drive 下載連結（瀏覽器會詢問是否允許多個下載）
-    selected.forEach((m, i) => {
-      setTimeout(() => {
-        const a = document.createElement("a");
-        a.href = `https://drive.google.com/uc?export=download&id=${m.image.fileId}`;
-        a.download = `${m.number}_${m.name}${m.image.fileName ? m.image.fileName.slice(m.image.fileName.lastIndexOf(".")) : ".jpg"}`;
-        a.target = "_blank";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }, i * 800); // 每張間隔 0.8 秒，避免瀏覽器擋掉
-    });
+
+    const JSZip = window.JSZip;
+    if (!JSZip) return alert("ZIP 套件載入失敗，請重新整理後再試");
+
+    const zip = new JSZip();
+    const zipName = exportProject ? `whatis_${exportProject}_圖片` : "whatis_材料圖片";
+    let failed = 0;
+
+    // 顯示進度
+    setSyncing(true);
+
+    await Promise.all(selected.map(async (m) => {
+      try {
+        const url = `https://drive.google.com/uc?export=download&id=${m.image.fileId}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("fetch failed");
+        const blob = await res.blob();
+        const ext = m.image.fileName
+          ? m.image.fileName.slice(m.image.fileName.lastIndexOf("."))
+          : ".jpg";
+        zip.file(`${m.number}_${m.name}${ext}`, blob);
+      } catch (e) {
+        failed++;
+      }
+    }));
+
+    setSyncing(false);
+
+    if (Object.keys(zip.files).length === 0) {
+      return alert("所有圖片下載失敗，可能是 Google Drive 權限問題");
+    }
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(content);
+    a.download = `${zipName}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+
+    if (failed > 0) alert(`完成，但有 ${failed} 張圖片下載失敗`);
   }
 
   // ── 主介面 ───────────────────────────────────────────────
