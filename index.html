@@ -570,15 +570,27 @@ function App() {
 
   // ── 初始載入 ─────────────────────────────────────────────
   React.useEffect(() => {
-    loadAll();
+    // 先從 localStorage 讀取快取，立即顯示
+    try {
+      const cache = localStorage.getItem("wd-mat-cache");
+      if (cache) {
+        const { materials: m, types: t, members: mb, vendors: v } = JSON.parse(cache);
+        if (m) setMaterials(m);
+        if (t) setTypes(t);
+        if (mb) setMembers(mb);
+        if (v) setVendors(v);
+        setLoading(false);
+        setSyncing(true);
+        loadAll(true); // 靜默更新
+        return;
+      }
+    } catch(e) {}
+    loadAll(false);
   }, []);
 
-  async function loadAll() {
-    if (isFirstLoad.current) {
-      setLoading(true);
-    } else {
-      setSyncing(true);
-    }
+  async function loadAll(silent = false) {
+    if (!silent) setLoading(true);
+    else setSyncing(true);
     setError("");
     try {
       const [matRows, typeRows, memberRows, vendorRows] = await Promise.all([
@@ -587,11 +599,18 @@ function App() {
         sheetGet("Members"),
         sheetGet("Vendors"),
       ]);
-      setMaterials(rowsToMaterials(matRows));
-      setTypes(rowsToTypes(typeRows));
-      setMembers(rowsToMembers(memberRows));
-      setVendors(rowsToVendors(vendorRows));
-      isFirstLoad.current = false;
+      const m = rowsToMaterials(matRows);
+      const t = rowsToTypes(typeRows);
+      const mb = rowsToMembers(memberRows);
+      const v = rowsToVendors(vendorRows);
+      setMaterials(m);
+      setTypes(t);
+      setMembers(mb);
+      setVendors(v);
+      // 存入快取
+      try {
+        localStorage.setItem("wd-mat-cache", JSON.stringify({ materials: m, types: t, members: mb, vendors: v }));
+      } catch(e) {}
     } catch (e) {
       setError("載入失敗，請確認網路與 GAS 部署設定");
     } finally {
@@ -879,6 +898,24 @@ function App() {
     win.document.close();
   }
 
+  // ── 圖片批次下載 ──────────────────────────────────────────
+  function downloadImages() {
+    const selected = materials.filter((m) => exportSelected.includes(m.id) && m.image);
+    if (!selected.length) return alert("所選材料中沒有圖片");
+    // 逐一開啟 Drive 下載連結（瀏覽器會詢問是否允許多個下載）
+    selected.forEach((m, i) => {
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = `https://drive.google.com/uc?export=download&id=${m.image.fileId}`;
+        a.download = `${m.number}_${m.name}${m.image.fileName ? m.image.fileName.slice(m.image.fileName.lastIndexOf(".")) : ".jpg"}`;
+        a.target = "_blank";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }, i * 800); // 每張間隔 0.8 秒，避免瀏覽器擋掉
+    });
+  }
+
   // ── 主介面 ───────────────────────────────────────────────
   const activeTypes = types.filter((t) => t.active);
 
@@ -909,6 +946,7 @@ function App() {
                 </datalist>
               </div>
               <button style={s.btnPrimary} onClick={exportPDF}>匯出 PDF</button>
+              <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text }} onClick={downloadImages}>下載圖片</button>
               <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text }} onClick={() => { setExportMode(false); setExportSelected([]); setExportProject(""); }}>取消</button>
             </>
           ) : (
