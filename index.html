@@ -899,7 +899,7 @@ function App() {
     win.document.close();
   }
 
-  // ── 圖片批次下載（ZIP） ───────────────────────────────────
+  // ── 圖片批次下載（ZIP，透過 GAS 中轉）────────────────────
   async function downloadImages() {
     const selected = materials.filter((m) => exportSelected.includes(m.id) && m.image);
     if (!selected.length) return alert("所選材料中沒有圖片");
@@ -911,28 +911,35 @@ function App() {
     const zipName = exportProject ? `whatis_${exportProject}_圖片` : "whatis_材料圖片";
     let failed = 0;
 
-    // 顯示進度
     setSyncing(true);
 
-    await Promise.all(selected.map(async (m) => {
+    // 透過 GAS 逐一取得 base64（避免 CORS）
+    for (const m of selected) {
       try {
-        const url = `https://drive.google.com/uc?export=download&id=${m.image.fileId}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("fetch failed");
-        const blob = await res.blob();
-        const ext = m.image.fileName
-          ? m.image.fileName.slice(m.image.fileName.lastIndexOf("."))
+        const res = await fetch(
+          `${GAS_URL}?action=getImageBase64&fileId=${m.image.fileId}`
+        );
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || "failed");
+
+        // base64 轉 Uint8Array
+        const binary = atob(data.base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+        const ext = data.fileName
+          ? data.fileName.slice(data.fileName.lastIndexOf("."))
           : ".jpg";
-        zip.file(`${m.number}_${m.name}${ext}`, blob);
+        zip.file(`${m.number}_${m.name}${ext}`, bytes);
       } catch (e) {
         failed++;
       }
-    }));
+    }
 
     setSyncing(false);
 
     if (Object.keys(zip.files).length === 0) {
-      return alert("所有圖片下載失敗，可能是 Google Drive 權限問題");
+      return alert("所有圖片下載失敗，請確認 GAS 已重新部署");
     }
 
     const content = await zip.generateAsync({ type: "blob" });
