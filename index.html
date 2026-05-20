@@ -458,26 +458,44 @@ function SquareImage({ image, size = 48, onClick }) {
 // ─── 圖片燈箱 ────────────────────────────────────────────────
 function LightBox({ image, onClose }) {
   if (!image) return null;
+  // 使用較大的 thumbnail（w1600）顯示，避免 CORS 問題
+  const displayUrl = image.fileId
+    ? `https://drive.google.com/thumbnail?id=${image.fileId}&sz=w1600`
+    : image.thumbUrl || image.viewUrl;
+  const downloadUrl = image.fileId
+    ? `https://drive.google.com/uc?export=download&id=${image.fileId}`
+    : image.viewUrl;
   return (
     <div style={s.modal} onClick={onClose}>
       <div
-        style={{ maxWidth: "88vw", maxHeight: "88vh", position: "relative" }}
+        style={{ maxWidth: "88vw", maxHeight: "88vh", position: "relative", background: "#fff", borderRadius: 6, padding: 12 }}
         onClick={(e) => e.stopPropagation()}
       >
         <img
-          src={image.viewUrl}
+          src={displayUrl}
           alt={image.fileName || ""}
-          style={{ maxWidth: "88vw", maxHeight: "80vh", borderRadius: 4, display: "block" }}
+          style={{ maxWidth: "80vw", maxHeight: "76vh", borderRadius: 4, display: "block", objectFit: "contain" }}
+          onError={(e) => { e.target.style.display = "none"; e.target.nextSibling.style.display = "flex"; }}
         />
+        <div style={{ display: "none", alignItems: "center", justifyContent: "center", width: 320, height: 240, background: G.surface, borderRadius: 4, color: G.textMuted, fontSize: 13 }}>
+          圖片無法顯示，請點「開啟原圖」
+        </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
           <a
-            href={image.viewUrl}
-            download
+            href={downloadUrl}
             target="_blank"
             rel="noreferrer"
             style={{ ...s.btnSecondary, textDecoration: "none", display: "inline-block" }}
           >
             下載原圖
+          </a>
+          <a
+            href={`https://drive.google.com/file/d/${image.fileId}/view`}
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...s.btnSecondary, textDecoration: "none", display: "inline-block" }}
+          >
+            開啟原圖
           </a>
           <button style={s.btnSecondary} onClick={onClose}>
             關閉
@@ -547,13 +565,20 @@ function App() {
     latestState.current = { materials, types, members, vendors };
   }, [materials, types, members, vendors]);
 
+  const [syncing, setSyncing] = React.useState(false);
+  const isFirstLoad = React.useRef(true);
+
   // ── 初始載入 ─────────────────────────────────────────────
   React.useEffect(() => {
     loadAll();
   }, []);
 
   async function loadAll() {
-    setLoading(true);
+    if (isFirstLoad.current) {
+      setLoading(true);
+    } else {
+      setSyncing(true);
+    }
     setError("");
     try {
       const [matRows, typeRows, memberRows, vendorRows] = await Promise.all([
@@ -566,10 +591,12 @@ function App() {
       setTypes(rowsToTypes(typeRows));
       setMembers(rowsToMembers(memberRows));
       setVendors(rowsToVendors(vendorRows));
+      isFirstLoad.current = false;
     } catch (e) {
       setError("載入失敗，請確認網路與 GAS 部署設定");
     } finally {
       setLoading(false);
+      setSyncing(false);
     }
   }
 
@@ -1169,33 +1196,13 @@ function App() {
 
       {/* ── 設定 Modal ── */}
       {showSettings && (
-        <div style={s.modal} onClick={() => setShowSettings(false)}>
-          <div style={{ ...s.modalBox, width: 360 }} onClick={(e) => e.stopPropagation()}>
-            <div style={s.modalTitle}>設定</div>
-            <div style={{ marginBottom: 20 }}>
-              <label style={s.label}>頁面色系</label>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                {Object.entries(THEMES).map(([key, t]) => (
-                  <div key={key} onClick={() => { setThemeKey(key); localStorage.setItem("wd-mat-theme", key); }}
-                    style={{ padding: "10px 14px", borderRadius: 4, border: `1px solid ${themeKey === key ? theme.accent : theme.border}`, cursor: "pointer", background: t.bg, color: t.text, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 14, height: 14, borderRadius: "50%", background: t.accent, flexShrink: 0 }} />
-                    {t.name}
-                    {themeKey === key && <span style={{ marginLeft: "auto", fontSize: 11, color: t.accent }}>✓</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div style={{ paddingTop: 16, borderTop: `1px solid ${theme.borderLight}` }}>
-              <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text, width: "100%", textAlign: "left", marginBottom: 8 }}
-                onClick={() => { setShowSettings(false); setShowMemberManager(true); }}>
-                成員管理
-              </button>
-            </div>
-            <div style={{ textAlign: "right", marginTop: 16 }}>
-              <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text }} onClick={() => setShowSettings(false)}>關閉</button>
-            </div>
-          </div>
-        </div>
+        <SettingsModal
+          themeKey={themeKey}
+          setThemeKey={(k) => { setThemeKey(k); localStorage.setItem("wd-mat-theme", k); }}
+          theme={theme}
+          onMember={() => { setShowSettings(false); setShowMemberManager(true); }}
+          onClose={() => setShowSettings(false)}
+        />
       )}
 
       {/* ── 廠商編輯 Modal ── */}
@@ -1260,6 +1267,113 @@ function App() {
 
       {/* ── 燈箱 ── */}
       <LightBox image={lightboxImage} onClose={() => setLightboxImage(null)} />
+
+      {/* ── 右下角同步提示 ── */}
+      {syncing && (
+        <div style={{ position: "fixed", bottom: 20, right: 20, background: theme.text, color: theme.bg, fontSize: 12, padding: "6px 14px", borderRadius: 20, opacity: 0.8, zIndex: 2000, pointerEvents: "none" }}>
+          更新中…
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── 設定 Modal 元件 ─────────────────────────────────────────
+function SettingsModal({ themeKey, setThemeKey, theme, onMember, onClose }) {
+  // 自訂色系：從 localStorage 讀取或用預設
+  const getCustom = () => {
+    try {
+      const c = localStorage.getItem("wd-mat-custom");
+      return c ? JSON.parse(c) : { h: 0, s: 0, l: 97 };
+    } catch(e) { return { h: 0, s: 0, l: 97 }; }
+  };
+  const [custom, setCustom] = React.useState(getCustom);
+
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => { const k = (n + h / 30) % 12; const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1); return Math.round(255 * c).toString(16).padStart(2, "0"); };
+    return `#${f(0)}${f(8)}${f(4)}`;
+  }
+
+  function applyCustom(c) {
+    const { h, s, l } = c;
+    const bg = hslToHex(h, s, l);
+    const surface = hslToHex(h, s, Math.max(l - 4, 0));
+    const border = hslToHex(h, s, Math.max(l - 12, 0));
+    const borderLight = hslToHex(h, s, Math.max(l - 7, 0));
+    const textL = l > 60 ? 20 : 90;
+    const text = hslToHex(h, Math.min(s + 5, 100), textL);
+    const textSec = hslToHex(h, Math.max(s - 10, 0), textL + 30);
+    const textMuted = hslToHex(h, Math.max(s - 20, 0), textL + 50);
+    const accent = hslToHex(h, Math.min(s + 10, 100), textL + 15);
+    const accentLight = hslToHex(h, s, Math.max(l - 8, 0));
+    const customTheme = { name: "自訂", bg, surface, border, borderLight, text, textSec, textMuted, accent, accentLight };
+    THEMES.custom = customTheme;
+    localStorage.setItem("wd-mat-custom", JSON.stringify(c));
+    setThemeKey("custom");
+  }
+
+  const previewBg = hslToHex(custom.h, custom.s, custom.l);
+
+  return (
+    <div style={s.modal} onClick={onClose}>
+      <div style={{ ...s.modalBox, width: 400, background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ ...s.modalTitle, color: theme.text }}>設定</div>
+
+        {/* 預設色系 */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ ...s.label, color: theme.textSec }}>預設色系</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {Object.entries(THEMES).filter(([k]) => k !== "custom").map(([key, t]) => (
+              <div key={key} onClick={() => setThemeKey(key)}
+                style={{ padding: "10px 14px", borderRadius: 4, border: `1px solid ${themeKey === key ? theme.accent : theme.border}`, cursor: "pointer", background: t.bg, color: t.text, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 14, height: 14, borderRadius: "50%", background: t.accent, flexShrink: 0 }} />
+                {t.name}
+                {themeKey === key && <span style={{ marginLeft: "auto", fontSize: 11, color: t.accent }}>✓</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 自訂色系 */}
+        <div style={{ paddingTop: 16, borderTop: `1px solid ${theme.borderLight}`, marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <label style={{ ...s.label, marginBottom: 0, color: theme.textSec }}>自訂色系</label>
+            <div style={{ width: 28, height: 28, borderRadius: 4, background: previewBg, border: `1px solid ${theme.border}` }} />
+          </div>
+          {[
+            { label: "色相 Hue", key: "h", min: 0, max: 360, unit: "°" },
+            { label: "飽和度 Saturation", key: "s", min: 0, max: 60, unit: "%" },
+            { label: "明度 Lightness", key: "l", min: 70, max: 100, unit: "%" },
+          ].map(({ label, key, min, max, unit }) => (
+            <div key={key} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: theme.textSec, marginBottom: 4 }}>
+                <span>{label}</span>
+                <span>{custom[key]}{unit}</span>
+              </div>
+              <input type="range" min={min} max={max} value={custom[key]}
+                onChange={(e) => setCustom((p) => ({ ...p, [key]: Number(e.target.value) }))}
+                style={{ width: "100%", accentColor: theme.accent }} />
+            </div>
+          ))}
+          <button style={{ ...s.btnPrimary, width: "100%", textAlign: "center" }} onClick={() => applyCustom(custom)}>
+            套用自訂色系
+          </button>
+        </div>
+
+        {/* 成員管理 */}
+        <div style={{ paddingTop: 16, borderTop: `1px solid ${theme.borderLight}` }}>
+          <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text, width: "100%", textAlign: "left" }}
+            onClick={onMember}>
+            成員管理
+          </button>
+        </div>
+
+        <div style={{ textAlign: "right", marginTop: 16 }}>
+          <button style={{ ...s.btnSecondary, borderColor: theme.border, color: theme.text }} onClick={onClose}>關閉</button>
+        </div>
+      </div>
     </div>
   );
 }
