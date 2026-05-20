@@ -797,11 +797,16 @@ function App() {
     if (conflict) alert(`注意：編號「${m.number}」在此類型中已存在衝突，請至列表排查`);
   }
 
-  function deleteMaterial(id) {
+  async function deleteMaterial(id) {
     const { materials: curMats } = latestState.current;
+    const target = curMats.find((m) => m.id === id);
     const newMats = curMats.filter((m) => m.id !== id);
     setMaterials(newMats);
     saveAll(newMats, undefined, undefined, undefined);
+    // 同步刪除 Drive 圖片
+    if (target && target.image && target.image.fileId) {
+      try { await deleteImage(target.image.fileId); } catch(e) {}
+    }
   }
 
   // ── 廠商管理 ─────────────────────────────────────────────
